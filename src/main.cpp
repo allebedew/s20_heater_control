@@ -9,6 +9,8 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include <EEPROM.h>
+#include <DHT_U.h>
 
 #include "creds.h"
 
@@ -18,8 +20,12 @@
 #define RX_PIN      1
 #define TX_PIN      3
 
+#define HEARTBIT_INTERVAL       60 * 1000
+#define SENSOR_READ_INTERVAL    10 * 1000
+
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
+DHT dht(RX_PIN, DHT21);
 
 const char* mqtt_server       = "10.0.0.3";
 const char* mqtt_device       = "towel_heater_fl1";
@@ -32,11 +38,18 @@ unsigned long timer_duration = 2 * 60 * 60 * 1000;
 int status = 0; // 0 - all ok, -1 - no wifi, -2 - no mqtt
 unsigned long last_mqtt_attempt = 0;
 unsigned long last_heartbit = 0;
+unsigned long last_read_sensor = 0;
+float temperature = NAN, humidity = NAN;
+bool sensor_error_sent = false;
 
 const size_t topic_len = 100;
 char topic[100];
 const size_t msg_len = 25;
 char msg[25];
+
+struct {
+  uint32_t timer_duration;
+} settings;
 
 void button_int_handler();
 void mqtt_message_handler(char*, byte*, unsigned int);
@@ -48,22 +61,31 @@ void stop_timer();
 void connect_mqtt_if_needed();
 void check_status();
 void check_timer();
-void update_mqtt(bool, bool, bool);
+void update_mqtt(bool, bool, bool, bool);
 void send_heartbit();
 void format_topic(const char*, const char*, bool);
 void mqtt_connected();
+void mqtt_debug(const char*);
+void read_sensors_and_send();
 
-void setup() {
-  Serial.begin(115200);
-  delay(10);
-  
+void setup() {  
   pinMode(BUTTON, INPUT);
   pinMode(RELAY, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(BUTTON), button_int_handler, CHANGE);
   update_gpio();
 
+  EEPROM.begin(32);
+  EEPROM.get(0, settings);
+
+  // if (settings.timer_duration <= 0) {
+    // settings.timer_duration = 120;
+  // }
+
+  dht.begin();
+
   WiFi.begin(ssid, password);  
+
   mqtt.setServer(mqtt_server, 1884);
   mqtt.setCallback(mqtt_message_handler);
 }
@@ -77,13 +99,14 @@ void loop() {
     } else {
       stop_timer();
     }
-    update_mqtt(false, true, false);
+    update_mqtt(false, true, false, false);    
   }
 
   connect_mqtt_if_needed();
   check_status();
   check_timer();
   update_gpio();
+  read_sensors_and_send();
   send_heartbit();
 
   delay(50);
@@ -108,15 +131,12 @@ void connect_mqtt_if_needed() {
   }
   if (mqtt.connect(mqtt_device, mqtt_login, mqtt_pass)) {
     mqtt_connected();
-  } else {
-    Serial.print("Failed to connect, rc=");
-    Serial.println(mqtt.state());
   }
   last_mqtt_attempt = millis();
 }
 
 void mqtt_connected() {
-  update_mqtt(true, true, true);
+  update_mqtt(true, true, true, true);
   last_heartbit = millis();
 
   format_topic("Heat", "", true);
@@ -126,10 +146,10 @@ void mqtt_connected() {
 }
 
 void send_heartbit() {
-  if (millis() - last_heartbit < 60 * 1000) {
+  if (millis() - last_heartbit < 10 * 1000) {
     return;
   }
-  update_mqtt(false, true, true);
+  update_mqtt(false, true, true, false);
   last_heartbit = millis();
 }
 
@@ -153,7 +173,7 @@ void format_topic(const char* control, const char* meta, bool setter) {
   }
 }
 
-void update_mqtt(bool meta, bool status, bool info) {
+void update_mqtt(bool meta, bool status, bool info, bool sensors) {
   if (status || info) {
     format_topic("Heat", "", false);
     mqtt.publish(topic, timer_started == 0 ? "0" : "1", true);
@@ -174,7 +194,7 @@ void update_mqtt(bool meta, bool status, bool info) {
   }
   if (info) {
     format_topic("IP", "", false);
-    mqtt.publish(topic, WiFi.localIP().toString().  c_str(), true);
+    mqtt.publish(topic, WiFi.localIP().toString().c_str(), true);
 
     format_topic("RSSI", "", false);
     snprintf(msg, msg_len, "%d dB", (int)WiFi.RSSI());
@@ -216,6 +236,48 @@ void update_mqtt(bool meta, bool status, bool info) {
     mqtt.publish(topic, "1", true);
     format_topic("RSSI", "order", false);
     mqtt.publish(topic, "5", true);
+
+    format_topic("Temperature", "type", false);
+    mqtt.publish(topic, "temperature", true);
+    format_topic("Temperature", "readonly", false);
+    mqtt.publish(topic, "1", true);
+    format_topic("Temperature", "order", false);
+    mqtt.publish(topic, "6", true);
+
+    format_topic("Humidity", "type", false);
+    mqtt.publish(topic, "rel_humidity", true);
+    format_topic("Humidity", "readonly", false);
+    mqtt.publish(topic, "1", true);
+    format_topic("Humidity", "order", false);
+    mqtt.publish(topic, "7", true);
+  }
+  if (sensors) {
+    if (isnan(humidity) || isnan(temperature)) {
+      if (sensor_error_sent == false) {
+        sensor_error_sent = true;
+
+        format_topic("Humidity", "error", false);
+        mqtt.publish(topic, "r", true);
+        format_topic("Temperature", "error", false);
+        mqtt.publish(topic, "r", true);
+      }
+    } else {
+      if (sensor_error_sent == true) {
+        sensor_error_sent = false;
+        
+        format_topic("Humidity", "error", false);
+        mqtt.publish(topic, "", true);
+        format_topic("Temperature", "error", false);
+        mqtt.publish(topic, "", true);
+      }
+      format_topic("Temperature", "", false);
+      snprintf(msg, msg_len, "%f", temperature);
+      mqtt.publish(topic, msg);
+
+      format_topic("Humidity", "", false);
+      snprintf(msg, msg_len, "%f", temperature);
+      mqtt.publish(topic, msg);
+    }
   }
 }
 
@@ -234,15 +296,24 @@ void mqtt_message_handler(char* rcv_topic, byte* payload, unsigned int length) {
         stop_timer();
       }
     }
-    update_mqtt(false, true, false);
+    update_mqtt(false, true, false, false);
     return;
   }
 
   format_topic("Duration", "", true);
   if (strcmp(topic, rcv_topic) == 0) {
-    Serial.printf("Rcv new duration %s\n", msg);
+
+    settings.timer_duration = 123;
+    EEPROM.put(0, settings);
+    EEPROM.commit();
+
     return;
   }
+}
+
+void mqtt_debug(const char* text) {
+  format_topic("Debug", "", false);
+  mqtt.publish(topic, text, false);
 }
 
 // ================= Timer ======================
@@ -292,9 +363,7 @@ void blink_green_led(int count) {
 
 void button_int_handler() {
   if (digitalRead(BUTTON) == 0) { 
-    if (millis() - button_debounce < 200) {
-      return;
-    }
+    if (millis() - button_debounce < 200) return;
     button_pressed_flag = true;
     button_debounce = millis();
   }
@@ -304,4 +373,21 @@ bool is_button_pressed() {
   bool flag = button_pressed_flag;
   button_pressed_flag = false;
   return flag;
+}
+
+// ============== Sensors =====================
+
+void read_sensors_and_send() {
+  if (millis() - last_read_sensor < SENSOR_READ_INTERVAL) return;
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+  last_read_sensor = millis();
+  update_mqtt(false, false, false, true);
+}
+
+// =============== OTA =======================
+
+void setup_ota() {
+
+
 }

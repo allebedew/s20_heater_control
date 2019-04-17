@@ -1,6 +1,11 @@
 
 # S20 Heater Control
 
+### 2do
+
+- OTA
+- BMP280 sensor
+
 ### creds.h should contain
 
 ``` 
@@ -15,11 +20,11 @@ const char* mqtt_pass   = "";
 ```
 /devices/s20_heater_1/meta/name Towel Heater
 
-/devices/s20_heater_1/controls/Heat 1
+/devices/s20_heater_1/controls/Heat
 /devices/s20_heater_1/controls/Heat/meta/type switch
 /devices/s20_heater_1/controls/Heat/meta/order 1
 
-/devices/s20_heater_1/controls/Duration 60
+/devices/s20_heater_1/controls/Duration
 /devices/s20_heater_1/controls/Duration/meta/type range
 /devices/s20_heater_1/controls/Duration/meta/max 300
 /devices/s20_heater_1/controls/Duration/meta/order 2
@@ -38,4 +43,14 @@ const char* mqtt_pass   = "";
 /devices/s20_heater_1/controls/RSSI/meta/type value
 /devices/s20_heater_1/controls/RSSI/meta/readonly 1
 /devices/s20_heater_1/controls/RSSI/meta/order 5
+
+/devices/s20_heater_1/controls/Temperature
+/devices/s20_heater_1/controls/Temperature/meta/type temperature
+/devices/s20_heater_1/controls/Temperature/meta/readonly 1
+/devices/s20_heater_1/controls/Temperature/meta/order 6
+
+/devices/s20_heater_1/controls/Humidity
+/devices/s20_heater_1/controls/Humidity/meta/type rel_humidity
+/devices/s20_heater_1/controls/Humidity/meta/readonly 1
+/devices/s20_heater_1/controls/Humidity/meta/order 7
 ```
